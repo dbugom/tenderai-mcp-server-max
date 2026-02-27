@@ -53,7 +53,7 @@ python -m app.server
   "mcpServers": {
     "tenderai": {
       "type": "http",
-      "url": "https://tender.yourdomain.com/mcp",
+      "url": "https://tender.yfi.ae/mcp",
       "headers": {
         "Authorization": "Bearer <MCP_API_KEY>"
       }
@@ -65,7 +65,7 @@ python -m app.server
 ### Production Deployment
 
 ```bash
-sudo ./setup.sh tender.yourdomain.com
+sudo ./setup.sh tender.yfi.ae
 # Edit /opt/tenderai/.env — set ANTHROPIC_API_KEY
 sudo systemctl start tenderai
 ```

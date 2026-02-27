@@ -407,7 +407,7 @@ ssh root@your-vps-ip
 
 # Run the automated setup
 cd /tmp/tenderai
-sudo ./setup.sh tender.yourdomain.com
+sudo ./setup.sh tender.yfi.ae
 ```
 
 The script will:
@@ -454,7 +454,7 @@ sudo systemctl status tenderai
 
 ```bash
 # Check if it's running
-curl https://tender.yourdomain.com/mcp
+curl https://tender.yfi.ae/mcp
 ```
 
 ### Step 7: View Logs
@@ -494,7 +494,7 @@ or Claude Code config:
   "mcpServers": {
     "tenderai": {
       "type": "http",
-      "url": "https://tender.yourdomain.com/mcp",
+      "url": "https://tender.yfi.ae/mcp",
       "headers": {
         "Authorization": "Bearer YOUR_MCP_API_KEY_HERE"
       }

@@ -26,11 +26,11 @@ tenders/
 ├── app/                            # Application code (do not modify unless developing)
 │   ├── server.py                   # Entry point
 │   ├── config.py                   # Configuration loader
-│   ├── tools/                      # MCP tools (document, technical, financial, partners)
+│   ├── tools/                      # MCP tools (document, technical, financial, partners, indexing)
 │   ├── resources/                  # Knowledge base resource handlers
 │   ├── prompts/                    # Workflow prompts
-│   ├── db/                         # Database schema and async layer
-│   ├── services/                   # LLM, parser, document writer
+│   ├── db/                         # Database schema, async layer, FTS5 + vector search
+│   ├── services/                   # LLM, parser, document writer, embeddings
 │   └── middleware/                 # Authentication
 │
 ├── data/                           # ⭐ YOUR DATA GOES HERE
@@ -125,6 +125,19 @@ data/past_proposals/
 - XLSX files are read to extract pricing/BOM data for financial reference
 - The AI uses this extracted content as grounding when writing new sections
 - You do **not** need to split proposals into separate section files
+
+**Indexing past proposals (recommended):**
+
+After uploading past proposals, you should **index** them for fast search:
+
+> "Index the past proposal in tra_network_2024"
+
+This parses all files, uses AI to extract structured metadata (title, client,
+technologies, pricing, etc.), and creates a searchable index. Indexed proposals
+are found instantly when writing new proposals instead of re-parsing files every
+time.
+
+See [Workflow 11: Index Past Proposals](#workflow-11-index-past-proposals) for details.
 
 **File naming tips (optional but helpful):**
 - If you want the AI to match a file to a specific section, include the section
@@ -329,12 +342,22 @@ ANTHROPIC_API_KEY=sk-ant-api03-your-actual-key-here
 # REQUIRED — your company name
 COMPANY_NAME=Your Company Name LLC
 
+# OPTIONAL — enables vector/semantic search for past proposals
+# Get a free key at https://dashboard.voyageai.com/
+VOYAGE_API_KEY=pa-your-voyage-key-here
+
 # Optional — change currency if needed (default: OMR)
 DEFAULT_CURRENCY=OMR
 
 # Keep transport as stdio for local use
 TRANSPORT=stdio
 ```
+
+> **Note on Voyage AI:** The `VOYAGE_API_KEY` is optional. Without it, past
+> proposal search uses keyword matching (FTS5) which works well. With it, you
+> also get semantic/vector search that finds similar proposals even when exact
+> keywords don't match. Voyage AI offers 200M free tokens — more than enough
+> for indexing hundreds of proposals.
 
 ### Step 4: Prepare Your Knowledge Base
 
@@ -368,10 +391,14 @@ python -m app.server
 You should see on stderr:
 
 ```
+2026-02-27 12:00:00 [INFO] tenderai: Voyage AI embeddings enabled — model=voyage-3-lite, dim=512
 2026-02-27 12:00:00 [INFO] tenderai: TenderAI server built — transport=stdio
-2026-02-27 12:00:00 [INFO] app.db.database: Database connected: /home/kitchen/Desktop/tenders/db/tenderai.db
+2026-02-27 12:00:00 [INFO] app.db.database: sqlite-vec loaded — vector search enabled (dim=512)
+2026-02-27 12:00:00 [INFO] app.db.database: Database connected: db/tenderai.db (vec=True)
 2026-02-27 12:00:00 [INFO] tenderai: Starting stdio transport
 ```
+
+If you don't have `VOYAGE_API_KEY` set, you'll see `VOYAGE_API_KEY not set — vector search disabled, using FTS5 only` instead, which is fine.
 
 Press `Ctrl+C` to stop. If you see these logs, the server works.
 
@@ -671,6 +698,75 @@ proposal, financial proposal, review and submission.
 
 ---
 
+### Workflow 11: Index Past Proposals
+
+After uploading past proposal files to `data/past_proposals/`, index them for
+fast search. Indexing parses all files once, extracts structured metadata using
+AI, and stores it in the database.
+
+**Index a single proposal:**
+
+> "Index the past proposal in tra_network_2024"
+
+**What happens:**
+1. All files in the folder are parsed (PDF, DOCX, XLSX, MD, TXT)
+2. AI extracts: title, client, sector, technologies, pricing, keywords
+3. A human-readable `_summary.md` is saved in the folder
+4. Metadata is stored in the database for instant search (FTS5 keyword index)
+5. If Voyage AI is configured, a vector embedding is generated for semantic search
+
+**Index multiple proposals:**
+
+> "Index all the past proposals in these folders: tra_network_2024, omantel_5g_2024, mod_security_2023"
+
+**Upload from a remote machine and index:**
+
+```bash
+# Upload via scp
+scp -r my-proposal/ root@tender.yfi.ae:/opt/tenderai/data/past_proposals/tra-network-2024/
+
+# Then tell Claude:
+# "Index the past proposal in tra-network-2024"
+```
+
+---
+
+### Workflow 12: Search Past Proposals
+
+Once proposals are indexed, you can search them instantly.
+
+**Keyword search (always available):**
+
+> "Search past proposals for network infrastructure telecom"
+
+> "Search past proposals for 'core network' in the telecom sector"
+
+**Semantic search (requires Voyage AI key):**
+
+> "Search past proposals semantically for large-scale government IT modernization projects"
+
+This finds proposals that are conceptually similar even if they don't contain
+the exact keywords.
+
+**Search modes:**
+- `keyword` — FTS5 with BM25 ranking. Supports `"quoted phrases"`, `prefix*`, `AND/OR` operators
+- `semantic` — Vector similarity via Voyage AI embeddings
+- `hybrid` — Both combined using Reciprocal Rank Fusion (best results)
+- `auto` (default) — Uses hybrid if Voyage AI is configured, keyword otherwise
+
+> "Search past proposals for 5G deployment in hybrid mode"
+
+---
+
+### Workflow 13: List All Indexed Proposals
+
+> "List all indexed past proposals"
+
+Returns a summary of every indexed proposal with aggregate stats: breakdown by
+sector, by country, and total combined value.
+
+---
+
 ## 7. Complete Tool Reference
 
 | # | Tool | What It Does |
@@ -690,6 +786,9 @@ proposal, financial proposal, review and submission.
 | 13 | `draft_partner_brief` | Generate partner requirements brief |
 | 14 | `create_nda_checklist` | Generate NDA checklist for partner |
 | 15 | `track_partner_deliverable` | Track expected partner deliverable |
+| 16 | `index_past_proposal` | Parse + AI-summarize a past proposal folder → searchable index |
+| 17 | `search_past_proposals` | Search indexed proposals (keyword, semantic, or hybrid) |
+| 18 | `list_indexed_proposals` | List all indexed proposals with stats |
 
 ---
 
@@ -789,10 +888,11 @@ sudo systemctl reload nginx
 | **RFP files to parse** | Anywhere on disk (auto-copied to `data/rfp_documents/`) | PDF, DOCX |
 | **Past submitted proposals** | `data/past_proposals/{project_name}/` | PDF, DOCX, XLSX, MD, TXT |
 | **Past cost/margin sheets** | `data/past_proposals/{project_name}/` | XLSX (alongside the proposal) |
+| **Indexed proposal summaries** | `data/past_proposals/{project_name}/_summary.md` (auto) | Markdown |
 | **Company profile** | `data/knowledge_base/company_profile/` | PDF, DOCX, or MD |
 | **Section templates** | `data/knowledge_base/templates/{section_name}.md` | Markdown |
 | **Standards references** | `data/knowledge_base/standards/{ref}.md` | Markdown |
 | **Vendor quotes** | Anywhere on disk (provide path to tool) | PDF, XLSX |
 | **Generated output** | `data/generated_proposals/` (auto) | DOCX, XLSX |
-| **Database** | `db/tenderai.db` (auto) | SQLite |
+| **Database** | `db/tenderai.db` (auto) | SQLite (+ FTS5 index + vector embeddings) |
 | **Configuration** | `.env` | Key=Value |

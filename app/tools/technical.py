@@ -1,7 +1,4 @@
-"""Technical Proposal tools — context loading, section saving, proposal assembly.
-
-Data-tool pattern: tools provide context and store results. Claude does the writing.
-"""
+"""Technical Proposal tools — section writing, full proposal assembly, architecture."""
 
 from __future__ import annotations
 
@@ -14,11 +11,26 @@ from mcp.server.fastmcp import FastMCP
 
 from app.db.database import Database
 from app.services.docwriter import DocWriterService
+from app.services.embeddings import EmbeddingService
+from app.services.llm import LLMService
 from app.services.parser import ParserService
 
 logger = logging.getLogger(__name__)
 
-# Supported file extensions for past proposals
+# Maps user-facing section names to LLM prompt template keys
+SECTION_TEMPLATE_MAP = {
+    "Company Profile": "company_profile",
+    "Past Successful Projects": "past_successful_projects",
+    "Executive Summary": "executive_summary",
+    "Technical Approach": "technical_approach",
+    "Solution Architecture": "solution_architecture",
+    "Implementation Methodology": "implementation_methodology",
+    "Project Timeline": "project_timeline",
+    "Team Qualifications": "team_qualifications",
+    "Past Experience": "past_experience",
+}
+
+# Supported file extensions for past proposals (PDF, DOCX, and text)
 PAST_PROPOSAL_EXTENSIONS = {".pdf", ".docx", ".doc", ".xlsx", ".xls", ".md", ".txt"}
 
 DEFAULT_SECTIONS = [
@@ -37,11 +49,12 @@ DEFAULT_SECTIONS = [
 def register_technical_tools(
     mcp: FastMCP,
     db: Database,
+    llm: LLMService,
     parser: ParserService,
     docwriter: DocWriterService,
     data_dir: Path,
     company_name: str,
-    embeddings=None,
+    embeddings: Optional[EmbeddingService] = None,
 ) -> None:
     """Register all technical proposal tools on the MCP server."""
 
@@ -51,10 +64,12 @@ def register_technical_tools(
         if not profile_dir.exists():
             return f"Company: {company_name}"
 
+        # Check for markdown first, then PDF/DOCX
         md_path = profile_dir / "profile.md"
         if md_path.exists():
             return md_path.read_text()
 
+        # Try PDF/DOCX company profile
         for ext in (".pdf", ".docx", ".doc"):
             for f in profile_dir.iterdir():
                 if f.suffix.lower() == ext:
@@ -66,185 +81,175 @@ def register_technical_tools(
 
         return f"Company: {company_name}"
 
-    async def _find_past_proposals(rfp_id: str) -> list[dict]:
-        """Find relevant past proposals using vector → FTS5 → filesystem cascade."""
+    async def _read_past_proposal_file(file_path: Path) -> str:
+        """Read a past proposal file — supports PDF, DOCX, XLSX, and text formats."""
+        ext = file_path.suffix.lower()
+        if ext in (".md", ".txt"):
+            return file_path.read_text()
+        elif ext in (".pdf", ".docx", ".doc", ".xlsx", ".xls"):
+            try:
+                parsed = await parser.parse_file(str(file_path))
+                return parsed["text"]
+            except Exception as e:
+                logger.warning("Could not parse past proposal file %s: %s", file_path, e)
+                return ""
+        return ""
+
+    async def _load_context_docs(rfp_id: str, section_name: str) -> list[str]:
+        """Load relevant context documents for grounding.
+
+        Supports PDF, DOCX, XLSX, and text past proposals as reference material.
+        """
+        docs = []
+
+        # Company profile
+        profile = await _load_company_profile()
+        docs.append(f"Company Profile:\n{profile}")
+
+        # RFP data
         rfp = await db.get_rfp(rfp_id)
-        search_terms = []
         if rfp:
-            if rfp.get("title"):
-                search_terms.append(rfp["title"])
-            if rfp.get("sector"):
-                search_terms.append(rfp["sector"])
-            if rfp.get("client"):
-                search_terms.append(rfp["client"])
-        search_query = " ".join(search_terms)
+            rfp_context = (
+                f"RFP Title: {rfp['title']}\n"
+                f"Client: {rfp['client']}\n"
+                f"Sector: {rfp['sector']}\n"
+                f"Country: {rfp['country']}\n"
+            )
+            if rfp.get("requirements"):
+                rfp_context += f"\nRequirements:\n" + "\n".join(
+                    f"- {r}" if isinstance(r, str) else f"- {r.get('requirement', str(r))}"
+                    for r in rfp["requirements"]
+                )
+            docs.append(rfp_context)
 
-        if search_query:
-            # Try vector search first
-            matches = []
-            if embeddings and db.vec_enabled:
-                try:
-                    query_vec = await embeddings.embed_query(search_query)
-                    matches = await db.search_proposal_vector(query_vec, limit=3)
-                    if matches:
-                        logger.debug("Found %d past proposals via vector search", len(matches))
-                except Exception as e:
-                    logger.debug("Vector search failed: %s", e)
+        # Check for relevant templates
+        template_path = data_dir / "knowledge_base" / "templates" / f"{section_name.lower().replace(' ', '_')}.md"
+        if template_path.exists():
+            docs.append(f"Template for {section_name}:\n{template_path.read_text()}")
 
-            # Fall back to FTS5
-            if not matches:
-                try:
+        # Check for relevant past proposals — prefer hybrid/FTS5 index, fall back to filesystem
+        try:
+            search_terms = []
+            if rfp:
+                if rfp.get("title"):
+                    search_terms.append(rfp["title"])
+                if rfp.get("sector"):
+                    search_terms.append(rfp["sector"])
+                if rfp.get("client"):
+                    search_terms.append(rfp["client"])
+            search_query = " ".join(search_terms)
+
+            if search_query:
+                # Try vector search first for semantic matching
+                matches = []
+                if embeddings and db.vec_enabled:
+                    try:
+                        query_vec = await embeddings.embed_query(search_query)
+                        matches = await db.search_proposal_vector(query_vec, limit=3)
+                        if matches:
+                            logger.debug("Loaded %d past proposals via vector search", len(matches))
+                    except Exception as e:
+                        logger.debug("Vector search failed: %s", e)
+
+                # Fall back to FTS5 if vector returned nothing
+                if not matches:
                     matches = await db.search_proposal_index(search_query, limit=3)
                     if matches:
-                        logger.debug("Found %d past proposals via FTS5", len(matches))
-                except Exception as e:
-                    logger.debug("FTS5 search failed: %s", e)
+                        logger.debug("Loaded %d past proposals via FTS5 search", len(matches))
 
-            if matches:
-                return matches
+                if matches:
+                    for m in matches:
+                        summary = m.get("technical_summary", "")
+                        if summary:
+                            techs = ", ".join(m.get("technologies", [])[:10])
+                            docs.append(
+                                f"Past proposal reference ({m.get('folder_name', '')}):\n"
+                                f"Title: {m.get('title', '')}\n"
+                                f"Client: {m.get('client', '')} | Sector: {m.get('sector', '')}\n"
+                                f"Technologies: {techs}\n\n"
+                                f"{summary[:3000]}"
+                            )
+                    return docs
+        except Exception as e:
+            logger.debug("Index search failed, falling back to filesystem: %s", e)
 
-        return []
-
-    async def _load_past_proposals_filesystem(section_name: str) -> list[str]:
-        """Fallback: load past proposals from filesystem."""
-        docs = []
+        # Fallback: filesystem scan
         past_dir = data_dir / "past_proposals"
         section_key = section_name.lower().replace(" ", "_")
-        if not past_dir.exists():
-            return docs
+        if past_dir.exists():
+            for proposal_dir in sorted(past_dir.iterdir()):
+                if proposal_dir.is_dir():
+                    # Check for _summary.md first (from indexing)
+                    summary_file = proposal_dir / "_summary.md"
+                    if summary_file.exists():
+                        content = summary_file.read_text()
+                        docs.append(f"Past proposal reference ({proposal_dir.name}):\n{content[:3000]}")
+                        continue
 
-        for proposal_dir in sorted(past_dir.iterdir()):
-            if not proposal_dir.is_dir():
-                continue
-            summary_file = proposal_dir / "_summary.md"
-            if summary_file.exists():
-                content = summary_file.read_text()
-                docs.append(f"Past proposal reference ({proposal_dir.name}):\n{content[:3000]}")
-                continue
+                    # Original logic: look for a file matching this section name
+                    matched = False
+                    for f in sorted(proposal_dir.iterdir()):
+                        if f.suffix.lower() in PAST_PROPOSAL_EXTENSIONS and section_key in f.name.lower():
+                            content = await _read_past_proposal_file(f)
+                            if content:
+                                docs.append(f"Past proposal reference ({proposal_dir.name}/{f.name}):\n{content[:3000]}")
+                                matched = True
+                                break
 
-            for f in sorted(proposal_dir.iterdir()):
-                if f.suffix.lower() in PAST_PROPOSAL_EXTENSIONS and section_key in f.name.lower():
-                    ext = f.suffix.lower()
-                    if ext in (".md", ".txt"):
-                        content = f.read_text()
-                    elif ext in (".pdf", ".docx", ".doc", ".xlsx", ".xls"):
-                        try:
-                            parsed = await parser.parse_file(str(f))
-                            content = parsed["text"]
-                        except Exception:
-                            content = ""
-                    else:
-                        content = ""
-                    if content:
-                        docs.append(f"Past proposal reference ({proposal_dir.name}/{f.name}):\n{content[:3000]}")
-                    break
+                    if not matched and section_key in ("company_profile", "past_successful_projects"):
+                        for f in sorted(proposal_dir.iterdir()):
+                            if f.suffix.lower() in PAST_PROPOSAL_EXTENSIONS:
+                                content = await _read_past_proposal_file(f)
+                                if content:
+                                    docs.append(f"Past submission ({proposal_dir.name}/{f.name}):\n{content[:4000]}")
+                                    break
 
         return docs
 
     @mcp.tool()
-    async def get_proposal_context(rfp_id: str, section_name: str = "") -> dict:
-        """Load all grounding context for writing a proposal section.
-
-        Returns the company profile, RFP data, relevant templates, and past proposal
-        references. Use this context to write the section, then call save_proposal_section
-        to store your written content.
-
-        Args:
-            rfp_id: ID of the parsed RFP
-            section_name: Section being written (e.g., "Technical Approach").
-                         Helps load the most relevant past proposal references.
-
-        Returns:
-            Dict with company_profile, rfp_data, template (if available),
-            past_proposal_references, and section_guidelines
-        """
-        rfp = await db.get_rfp(rfp_id)
-        if not rfp:
-            raise ValueError(f"RFP not found: {rfp_id}")
-
-        # Company profile
-        company_profile = await _load_company_profile()
-
-        # RFP context
-        rfp_data = {
-            "title": rfp["title"],
-            "client": rfp["client"],
-            "sector": rfp["sector"],
-            "country": rfp["country"],
-            "rfp_number": rfp.get("rfp_number", ""),
-            "deadline": rfp.get("deadline", ""),
-            "requirements": rfp.get("requirements", []),
-            "parsed_sections": rfp.get("parsed_sections", {}),
-            "evaluation_criteria": rfp.get("evaluation_criteria", []),
-        }
-
-        # Template
-        template = None
-        if section_name:
-            template_path = data_dir / "knowledge_base" / "templates" / f"{section_name.lower().replace(' ', '_')}.md"
-            if template_path.exists():
-                template = template_path.read_text()
-
-        # Past proposals
-        past_refs = []
-        matches = await _find_past_proposals(rfp_id)
-        if matches:
-            for m in matches:
-                techs = ", ".join(m.get("technologies", [])[:10])
-                past_refs.append({
-                    "folder_name": m.get("folder_name", ""),
-                    "title": m.get("title", ""),
-                    "client": m.get("client", ""),
-                    "sector": m.get("sector", ""),
-                    "technologies": techs,
-                    "technical_summary": m.get("technical_summary", "")[:3000],
-                })
-        else:
-            # Filesystem fallback
-            fs_docs = await _load_past_proposals_filesystem(section_name or "general")
-            for doc in fs_docs[:3]:
-                past_refs.append({"raw_content": doc})
-
-        # Section guidelines
-        section_guidelines = {
-            "Executive Summary": "400-600 words. Address client by name, restate objectives, present solution, highlight differentiators, close with commitment.",
-            "Technical Approach": "800-1200 words. Describe solution architecture, technology choices, and how they address each requirement.",
-            "Solution Architecture": "800-1200 words. Cover topology, components, redundancy, security, integration points.",
-            "Implementation Methodology": "600-1000 words. Phased approach, milestones, deliverables, quality gates, risk mitigation.",
-            "Project Timeline": "400-800 words. Phase-by-phase timeline with durations, dependencies, milestones.",
-            "Team Qualifications": "400-800 words. Team structure, key personnel, certifications, experience.",
-            "Past Experience": "400-800 words. 3-5 relevant projects with scope, technologies, outcomes.",
-            "Company Profile": "400-800 words. Legal name, establishment, certifications, employees, geographic presence.",
-            "Past Successful Projects": "400-800 words. Relevant projects with scope, value, technologies, outcomes.",
-        }
-
-        return {
-            "company_profile": company_profile,
-            "rfp_data": rfp_data,
-            "template": template,
-            "past_proposal_references": past_refs,
-            "section_guidelines": section_guidelines.get(section_name, "500-1000 words. Formal proposal language."),
-        }
-
-    @mcp.tool()
-    async def save_proposal_section(
-        rfp_id: str, section_name: str, content: str
+    async def write_technical_section(
+        section_name: str, rfp_id: str, context: str = ""
     ) -> dict:
-        """Save a proposal section that you (Claude) have written.
+        """Write a single section of a technical proposal grounded by RFP requirements and company knowledge.
+
+        Generates formal proposal narrative for the specified section using the RFP data,
+        company profile, templates, and past proposals as context.
 
         Args:
-            rfp_id: ID of the parsed RFP
             section_name: Name of the section (e.g., "Executive Summary", "Technical Approach")
-            content: The section content you wrote
+            rfp_id: ID of the parsed RFP
+            context: Additional context or instructions for this section
 
         Returns:
-            Dict with section_name, word_count, and proposal_id
+            Dict with section_name, content, and word_count
         """
         rfp = await db.get_rfp(rfp_id)
         if not rfp:
             raise ValueError(f"RFP not found: {rfp_id}")
 
-        # Find or create technical proposal
+        # Load grounding context
+        context_docs = await _load_context_docs(rfp_id, section_name)
+
+        # Build section-specific prompt
+        template_key = SECTION_TEMPLATE_MAP.get(section_name, "general")
+        user_prompt = (
+            f"Write the '{section_name}' section for a technical proposal.\n\n"
+            f"Tender: {rfp['title']}\n"
+            f"Client: {rfp['client']}\n"
+            f"Sector: {rfp['sector']}\n"
+        )
+        if context:
+            user_prompt += f"\nAdditional context: {context}\n"
+        user_prompt += (
+            f"\nWrite 500-1000 words of formal proposal content. "
+            f"Do not include the section heading itself — just the body text."
+        )
+
+        content = await llm.generate_section(
+            template_key, user_prompt, context_docs
+        )
+
+        # Store in proposal
         proposals = await db.get_proposals_for_rfp(rfp_id, "technical")
         if isinstance(proposals, dict):
             proposal = proposals
@@ -261,6 +266,7 @@ def register_technical_tools(
         sections = proposal.get("sections", [])
         section_id = section_name.lower().replace(" ", "_")
 
+        # Replace existing or append
         updated = False
         for i, sec in enumerate(sections):
             if sec.get("section_id") == section_id:
@@ -283,27 +289,27 @@ def register_technical_tools(
         await db.update_proposal(proposal["id"], sections=sections)
 
         word_count = len(content.split())
-        logger.info("Saved section '%s' for RFP %s (%d words)", section_name, rfp_id, word_count)
+        logger.info("Wrote section '%s' for RFP %s (%d words)", section_name, rfp_id, word_count)
 
         return {
             "section_name": section_name,
+            "content": content.strip(),
             "word_count": word_count,
             "proposal_id": proposal["id"],
         }
 
     @mcp.tool()
-    async def assemble_technical_proposal(
+    async def build_full_technical_proposal(
         rfp_id: str, sections: list[str] | None = None
     ) -> str:
-        """Assemble saved proposal sections into a formatted DOCX document.
+        """Build a complete technical proposal DOCX with all sections.
 
-        Uses sections already saved via save_proposal_section. The document follows
-        standard tender structure: cover page, Company Profile, Past Successful
-        Projects, TOC, then the technical body sections.
+        Generates each section using AI, then assembles them into a professionally
+        formatted DOCX document with cover page, table of contents, and consistent styling.
 
         Args:
             rfp_id: ID of the parsed RFP
-            sections: Optional list of section names to include. Defaults to all 9 standard sections.
+            sections: Optional list of section names. Defaults to standard 7-section structure.
 
         Returns:
             File path to the generated DOCX document
@@ -314,42 +320,20 @@ def register_technical_tools(
 
         section_list = sections or DEFAULT_SECTIONS
 
-        # Get existing proposal with saved sections
-        proposals = await db.get_proposals_for_rfp(rfp_id, "technical")
-        if isinstance(proposals, dict):
-            proposal = proposals
-        elif isinstance(proposals, list) and proposals:
-            proposal = proposals[0]
-        else:
-            raise ValueError(f"No technical proposal found for RFP {rfp_id}. Save sections first with save_proposal_section.")
-
-        saved_sections = {
-            sec.get("title", ""): sec.get("content", "")
-            for sec in proposal.get("sections", [])
-        }
-
-        # Build document sections from saved content
+        # Generate each section
         doc_sections = []
-        missing = []
         for section_name in section_list:
-            content = saved_sections.get(section_name, "")
-            if content:
-                doc_sections.append({
-                    "title": section_name,
-                    "content": content,
-                })
-            else:
-                missing.append(section_name)
-
-        if not doc_sections:
-            raise ValueError(
-                f"No sections saved yet. Use save_proposal_section to write sections first. "
-                f"Missing: {', '.join(missing)}"
+            logger.info("Generating section: %s", section_name)
+            result = await write_technical_section(
+                section_name=section_name,
+                rfp_id=rfp_id,
             )
+            doc_sections.append({
+                "title": section_name,
+                "content": result["content"],
+            })
 
-        if missing:
-            logger.warning("Assembling proposal with missing sections: %s", ", ".join(missing))
-
+        # Assemble DOCX
         metadata = {
             "client": rfp["client"],
             "company": company_name,
@@ -362,8 +346,98 @@ def register_technical_tools(
             metadata=metadata,
         )
 
-        # Update proposal record
-        await db.update_proposal(proposal["id"], output_path=output_path, status="review")
+        # Update proposal record with output path
+        proposals = await db.get_proposals_for_rfp(rfp_id, "technical")
+        if isinstance(proposals, dict):
+            await db.update_proposal(proposals["id"], output_path=output_path, status="review")
+        elif isinstance(proposals, list) and proposals:
+            await db.update_proposal(proposals[0]["id"], output_path=output_path, status="review")
 
-        logger.info("Assembled technical proposal: %s (%d sections)", output_path, len(doc_sections))
+        logger.info("Built full technical proposal: %s", output_path)
         return output_path
+
+    @mcp.tool()
+    async def generate_architecture_description(
+        topology_type: str,
+        components: list[str],
+        rfp_id: str = "",
+    ) -> str:
+        """Generate a formal architecture description narrative.
+
+        Creates a detailed technical architecture description covering topology,
+        components, interconnections, redundancy, and security considerations.
+
+        Args:
+            topology_type: Type of architecture (e.g., "hub-and-spoke", "mesh", "three-tier", "microservices")
+            components: List of technology components (e.g., ["Cisco ISR 4451", "Palo Alto PA-5200", "F5 BIG-IP"])
+            rfp_id: Optional RFP ID for additional context
+
+        Returns:
+            Markdown text with the architecture description
+        """
+        context_docs = []
+        if rfp_id:
+            rfp = await db.get_rfp(rfp_id)
+            if rfp:
+                context_docs.append(
+                    f"RFP: {rfp['title']}\nClient: {rfp['client']}\n"
+                    f"Requirements: {json.dumps(rfp.get('requirements', []))}"
+                )
+
+        profile = await _load_company_profile()
+        context_docs.append(profile)
+
+        user_prompt = (
+            f"Write a formal architecture description for a {topology_type} topology.\n\n"
+            f"Components:\n" + "\n".join(f"- {c}" for c in components) + "\n\n"
+            "Cover:\n"
+            "1. Architecture Overview — overall topology and design philosophy\n"
+            "2. Component Descriptions — role and function of each component\n"
+            "3. Interconnections — how components communicate and integrate\n"
+            "4. Redundancy & High Availability — failover and resilience design\n"
+            "5. Security Architecture — security layers and controls\n"
+            "6. Scalability — how the architecture supports future growth\n\n"
+            "Write 800-1200 words in formal proposal language."
+        )
+
+        content = await llm.generate_section(
+            "architecture_description", user_prompt, context_docs
+        )
+
+        logger.info("Generated architecture description: %s topology, %d components", topology_type, len(components))
+        return content.strip()
+
+    @mcp.tool()
+    async def write_compliance_narrative(
+        requirement: str, our_solution: str, rfp_id: str = ""
+    ) -> str:
+        """Write a formal compliance narrative explaining how our solution meets a specific requirement.
+
+        Args:
+            requirement: The tender requirement to address
+            our_solution: Brief description of our proposed solution/approach
+            rfp_id: Optional RFP ID for additional context
+
+        Returns:
+            Formal compliance paragraph suitable for inclusion in a proposal
+        """
+        context_docs = [await _load_company_profile()]
+        if rfp_id:
+            rfp = await db.get_rfp(rfp_id)
+            if rfp:
+                context_docs.append(f"RFP: {rfp['title']}\nClient: {rfp['client']}")
+
+        user_prompt = (
+            f"Requirement: {requirement}\n\n"
+            f"Our Solution: {our_solution}\n\n"
+            "Write a formal compliance response (3-5 sentences) explaining how our solution "
+            "fully addresses this requirement. Use language like 'The proposed solution...', "
+            "'Our approach ensures...', etc. Reference specific capabilities where relevant."
+        )
+
+        content = await llm.generate_section(
+            "compliance_narrative", user_prompt, context_docs
+        )
+
+        logger.info("Generated compliance narrative for requirement: %.60s...", requirement)
+        return content.strip()

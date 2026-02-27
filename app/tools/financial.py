@@ -1,8 +1,4 @@
-"""Financial Proposal tools — vendor quotes, BOM, pricing, financial proposal generation.
-
-Data-tool pattern: ingest_vendor_quote returns raw text for Claude to analyze.
-Claude extracts items and calls save_vendor_items to store them.
-"""
+"""Financial Proposal tools — vendor quotes, BOM, pricing, financial proposal generation."""
 
 from __future__ import annotations
 
@@ -14,6 +10,7 @@ from mcp.server.fastmcp import FastMCP
 
 from app.db.database import Database
 from app.services.docwriter import DocWriterService
+from app.services.llm import LLMService
 from app.services.parser import ParserService
 
 logger = logging.getLogger(__name__)
@@ -22,6 +19,7 @@ logger = logging.getLogger(__name__)
 def register_financial_tools(
     mcp: FastMCP,
     db: Database,
+    llm: LLMService,
     parser: ParserService,
     docwriter: DocWriterService,
     data_dir: Path,
@@ -32,83 +30,97 @@ def register_financial_tools(
 
     @mcp.tool()
     async def ingest_vendor_quote(vendor_name: str, quote_file: str) -> dict:
-        """Parse a vendor quote document and return raw extracted content.
+        """Parse a vendor quote document and extract pricing line items.
 
-        Returns the raw text and tables from the quote file. You (Claude) should
-        analyze the content, extract line items, then call save_vendor_items
-        to store the structured data.
+        Supports PDF and XLSX formats. Creates or updates the vendor record
+        and extracts all pricing line items.
 
         Args:
             vendor_name: Name of the vendor (e.g., "Cisco", "Palo Alto Networks")
             quote_file: Path to the quote document (PDF or XLSX)
 
         Returns:
-            Dict with vendor_name, raw text, tables, and format
+            Dict with vendor_id, items_parsed, total, and parsed_items list
         """
+        # Parse the quote file
         parsed = await parser.parse_file(quote_file)
 
         # Copy to vendor_quotes directory
         quotes_dir = data_dir / "vendor_quotes"
         quotes_dir.mkdir(parents=True, exist_ok=True)
 
-        logger.info("Parsed vendor quote: %s (%d chars)", vendor_name, len(parsed.get("text", "")))
-
-        return {
-            "vendor_name": vendor_name,
-            "text": parsed["text"],
-            "tables": parsed.get("tables", []),
-            "page_count": parsed.get("page_count", 0),
-            "format": parsed.get("format", ""),
-        }
-
-    @mcp.tool()
-    async def save_vendor_items(
-        vendor_name: str,
-        currency: str,
-        items: list[dict],
-    ) -> dict:
-        """Save structured vendor quote items that you (Claude) extracted.
-
-        Args:
-            vendor_name: Name of the vendor
-            currency: Currency code (e.g., "USD", "OMR", "EUR")
-            items: List of dicts, each with: category, item_name, description,
-                  manufacturer, part_number, quantity, unit, unit_cost
-
-        Returns:
-            Dict with vendor_id, items_saved, and total
-        """
-        vendor = await db.upsert_vendor(
-            name=vendor_name,
-            currency=currency or default_currency,
+        # Use LLM to extract structured pricing data
+        extract_prompt = (
+            "Extract pricing line items from this vendor quote as JSON:\n"
+            "{\n"
+            '  "currency": "USD or OMR or EUR",\n'
+            '  "items": [\n'
+            "    {\n"
+            '      "category": "hardware|software|services|licensing|support",\n'
+            '      "item_name": "product/service name",\n'
+            '      "description": "brief description",\n'
+            '      "manufacturer": "manufacturer name",\n'
+            '      "part_number": "part number if available",\n'
+            '      "quantity": 1,\n'
+            '      "unit": "unit|license|month|year",\n'
+            '      "unit_cost": 0.00\n'
+            "    }\n"
+            "  ]\n"
+            "}\n\n"
+            "Return ONLY valid JSON.\n\n"
+            f"Document text:\n{parsed['text'][:10000]}"
         )
 
+        result_text = await llm.generate(
+            system_prompt="You are an expert at parsing vendor quotations and extracting pricing data.",
+            user_prompt=extract_prompt,
+        )
+
+        try:
+            extracted = json.loads(result_text.strip())
+        except json.JSONDecodeError:
+            if "```json" in result_text:
+                json_str = result_text.split("```json")[1].split("```")[0].strip()
+                extracted = json.loads(json_str)
+            elif "```" in result_text:
+                json_str = result_text.split("```")[1].split("```")[0].strip()
+                extracted = json.loads(json_str)
+            else:
+                raise ValueError(f"Could not parse LLM response as JSON: {result_text[:200]}")
+
+        # Upsert vendor
+        vendor = await db.upsert_vendor(
+            name=vendor_name,
+            currency=extracted.get("currency", default_currency),
+        )
+
+        items = extracted.get("items", [])
         total = sum(
             item.get("quantity", 1) * item.get("unit_cost", 0) for item in items
         )
 
-        logger.info(
-            "Saved vendor items: %s (%d items, total=%.2f %s)",
-            vendor_name, len(items), total, currency,
-        )
+        logger.info("Ingested vendor quote: %s (%d items, total=%.2f)", vendor_name, len(items), total)
 
         return {
             "vendor_id": vendor["id"],
             "vendor_name": vendor_name,
-            "items_saved": len(items),
+            "items_parsed": len(items),
             "total": total,
-            "currency": currency or default_currency,
-            "items": items,
+            "currency": extracted.get("currency", default_currency),
+            "parsed_items": items,
         }
 
     @mcp.tool()
     async def build_bom(rfp_id: str, vendor_quotes: list[dict]) -> dict:
         """Build a Bill of Materials from multiple vendor quotes.
 
+        Creates a financial proposal record and inserts BOM items from the provided
+        vendor quote data. Each quote dict should have: vendor_name, and items list
+        (as returned by ingest_vendor_quote).
+
         Args:
             rfp_id: ID of the parsed RFP
-            vendor_quotes: List of dicts, each with "vendor_name" and "items"
-                          (as structured by save_vendor_items)
+            vendor_quotes: List of dicts, each with "vendor_name" and "items" (list of line items)
 
         Returns:
             Dict with proposal_id, item_count, subtotal, and by_category breakdown
@@ -117,6 +129,7 @@ def register_financial_tools(
         if not rfp:
             raise ValueError(f"RFP not found: {rfp_id}")
 
+        # Create financial proposal
         proposal = await db.create_proposal(
             rfp_id=rfp_id,
             proposal_type="financial",
@@ -150,6 +163,7 @@ def register_financial_tools(
                 item_count += 1
                 sort_order += 1
 
+        # Get totals
         totals = await db.get_bom_totals(proposal["id"])
 
         logger.info("Built BOM for RFP %s: %d items, total=%.2f", rfp_id, item_count, totals["total"])
@@ -166,11 +180,14 @@ def register_financial_tools(
     async def calculate_final_pricing(
         proposal_id: str, margin_rules: dict | None = None
     ) -> dict:
-        """Calculate final pricing with margin adjustments.
+        """Calculate final pricing for a financial proposal with margin adjustments.
+
+        Applies margin rules per category and recalculates all totals. The SQLite
+        computed column handles the total_cost calculation automatically.
 
         Args:
             proposal_id: ID of the financial proposal
-            margin_rules: Optional dict mapping category to margin %.
+            margin_rules: Optional dict mapping category names to margin percentages.
                          Example: {"hardware": 12, "software": 20, "services": 25}
 
         Returns:
@@ -184,6 +201,7 @@ def register_financial_tools(
         if not bom_items:
             raise ValueError(f"No BOM items found for proposal {proposal_id}")
 
+        # Apply margin rules if provided
         if margin_rules:
             for item in bom_items:
                 category = item.get("category", "").lower()
@@ -192,6 +210,7 @@ def register_financial_tools(
                     if item["margin_pct"] != new_margin:
                         await db.update_bom_item(item["id"], margin_pct=new_margin)
 
+        # Re-fetch totals after margin updates
         totals = await db.get_bom_totals(proposal_id)
 
         logger.info("Calculated pricing for proposal %s: total=%.2f", proposal_id, totals["total"])
@@ -207,7 +226,9 @@ def register_financial_tools(
 
     @mcp.tool()
     async def generate_financial_proposal(rfp_id: str, proposal_id: str) -> str:
-        """Generate financial proposal DOCX + BOM XLSX from database data.
+        """Generate a complete financial proposal DOCX with pricing tables and terms.
+
+        Also generates a BOM spreadsheet (XLSX) alongside the DOCX document.
 
         Args:
             rfp_id: ID of the parsed RFP
@@ -237,9 +258,13 @@ def register_financial_tools(
             "currency": default_currency,
         }
 
+        # Generate DOCX
         docx_path = docwriter.create_financial_proposal(bom_items, metadata)
+
+        # Also generate BOM spreadsheet
         xlsx_path = docwriter.create_bom_spreadsheet(bom_items, metadata)
 
+        # Update proposal with output path
         await db.update_proposal(proposal_id, output_path=docx_path, status="review")
 
         logger.info("Generated financial proposal: %s (BOM: %s)", docx_path, xlsx_path)

@@ -132,7 +132,7 @@ After uploading past proposals, you should **index** them for fast search:
 
 > "Index the past proposal in tra_network_2024"
 
-This parses all files, Claude extracts structured metadata (title, client,
+This parses all files, uses AI to extract structured metadata (title, client,
 technologies, pricing, etc.), and creates a searchable index. Indexed proposals
 are found instantly when writing new proposals instead of re-parsing files every
 time.
@@ -336,6 +336,9 @@ nano .env
 **Minimum required changes in `.env`:**
 
 ```ini
+# REQUIRED — your Anthropic API key
+ANTHROPIC_API_KEY=sk-ant-api03-your-actual-key-here
+
 # REQUIRED — your company name
 COMPANY_NAME=Your Company Name LLC
 
@@ -348,10 +351,6 @@ DEFAULT_CURRENCY=OMR
 
 # Keep transport as stdio for local use
 TRANSPORT=stdio
-
-# NOTE: ANTHROPIC_API_KEY is NOT required!
-# Claude Max/Pro subscription handles all reasoning and writing.
-# Only set this if you want legacy server-side AI tools.
 ```
 
 > **Note on Voyage AI:** The `VOYAGE_API_KEY` is optional. Without it, past
@@ -454,12 +453,10 @@ The script will:
 sudo nano /opt/tenderai/.env
 ```
 
-Set your company name and optionally Voyage AI key:
+Set your Anthropic API key:
 ```ini
+ANTHROPIC_API_KEY=sk-ant-api03-your-actual-key-here
 COMPANY_NAME=Your Company Name LLC
-
-# Optional — enables semantic search for past proposals
-VOYAGE_API_KEY=pa-your-voyage-key-here
 ```
 
 ### Step 4: Upload Your Knowledge Base
@@ -508,13 +505,14 @@ or Claude Code config:
     "tenderai": {
       "command": "/home/kitchen/Desktop/tenders/venv/bin/python",
       "args": ["-m", "app.server"],
-      "cwd": "/home/kitchen/Desktop/tenders"
+      "cwd": "/home/kitchen/Desktop/tenders",
+      "env": {
+        "ANTHROPIC_API_KEY": "sk-ant-api03-your-key-here"
+      }
     }
   }
 }
 ```
-
-No API keys needed in the config — Claude Max/Pro handles all reasoning.
 
 ### Option B: Remote HTTP (Production)
 
@@ -550,11 +548,10 @@ TenderAI tools available.
 
 **What happens:**
 1. Claude calls `parse_tender_rfp` with your file path
-2. The PDF is parsed and raw text + tables are returned
-3. Claude analyzes the content and extracts structured data (title, client, requirements, etc.)
-4. Claude calls `save_rfp` to store the structured data in the database
-5. File is copied to `data/rfp_documents/`
-6. You get back: rfp_id, title, client, deadline, requirements, evaluation criteria
+2. The PDF is parsed (text + tables extracted)
+3. AI analyzes the content and extracts structured data
+4. File is copied to `data/rfp_documents/`
+5. You get back: rfp_id, title, client, deadline, requirements, evaluation criteria
 
 **Save the rfp_id** — you'll use it for everything else.
 
@@ -586,31 +583,17 @@ Claude calls `check_submission_deadline` and returns:
 
 ### Workflow 4: Write the Technical Proposal
 
-**Step 1 — Load context for each section:**
-
-> "Load the proposal context for RFP abc123, section Technical Approach"
-
-Claude calls `get_proposal_context` which returns the company profile, RFP data,
-relevant templates, and past proposal references — everything needed to write
-a grounded section.
-
-**Step 2 — Claude writes the section and saves it:**
+**Option A — One section at a time (recommended for review):**
 
 > "Write the Technical Approach section for RFP abc123"
 
-Claude uses the loaded context to write the section, then calls `save_proposal_section`
-to store it.
-
 > "Write the Solution Architecture section for RFP abc123. Context: We're proposing a hub-and-spoke topology with Cisco ISR routers and Palo Alto firewalls."
 
-**Step 3 — Assemble the DOCX:**
+**Option B — Full proposal at once:**
 
-> "Assemble the technical proposal for RFP abc123"
+> "Build the full technical proposal for RFP abc123"
 
-Claude calls `assemble_technical_proposal` to combine all saved sections into a
-professionally formatted DOCX with cover page and table of contents.
-
-The standard 9-section order is:
+This generates all 9 standard sections in the correct submission order:
 
 1. **Company Profile** ← opening pages (before TOC)
 2. **Past Successful Projects** ← opening pages (before TOC)
@@ -623,31 +606,41 @@ The standard 9-section order is:
 9. Team Qualifications
 10. Past Experience
 
-Claude uses your company profile document and past submitted proposals (PDF/DOCX
-from `data/past_proposals/`) as reference material when writing these sections.
+The generated DOCX follows the standard government tender structure where the
+first few pages are your Company Profile and Past Successful Projects, just
+like your real submissions. These sections are placed before the Table of
+Contents, with the technical body following after.
+
+The AI uses your company profile document and past submitted proposals (PDF/DOCX
+from `data/past_proposals/`) as reference material when generating these sections.
 
 **Output:** A professionally formatted DOCX saved to `data/generated_proposals/`
 
 ---
 
-### Workflow 5: Generate Compliance Matrix
+### Workflow 5: Generate Architecture Description
 
-> "Generate a compliance matrix for RFP abc123"
+> "Generate an architecture description for a hub-and-spoke topology using Cisco ISR 4451, Palo Alto PA-5200, and F5 BIG-IP. RFP ID: abc123"
 
-Claude analyzes each requirement from the RFP, determines compliance status,
-writes a narrative response, then calls `export_compliance_matrix` to generate
-a DOCX with a formatted table.
+Returns a detailed narrative covering topology, components, redundancy,
+security, and scalability.
 
 ---
 
-### Workflow 6: Financial Proposal (Vendor Quotes → BOM → Pricing)
+### Workflow 6: Generate Compliance Matrix
+
+> "Generate a compliance matrix for RFP abc123"
+
+For each requirement in the RFP, AI generates a compliance status and narrative
+response. Output is a DOCX with a formatted table.
+
+---
+
+### Workflow 7: Financial Proposal (Vendor Quotes → BOM → Pricing)
 
 **Step 1 — Ingest vendor quotes:**
 
 > "Ingest this Cisco quote from /home/kitchen/Downloads/cisco_quote.pdf for vendor Cisco Systems"
-
-Claude calls `ingest_vendor_quote` to parse the file, analyzes the raw text to
-extract line items, then calls `save_vendor_items` to store the structured data.
 
 > "Ingest this Palo Alto quote from /home/kitchen/Downloads/pa_quote.xlsx for vendor Palo Alto Networks"
 
@@ -668,14 +661,11 @@ extract line items, then calls `save_vendor_items` to store the structured data.
 
 ---
 
-### Workflow 7: Partner Coordination
+### Workflow 8: Partner Coordination
 
 **Draft a brief for a partner:**
 
 > "Draft a technical brief for our partner Telefonica for RFP abc123"
-
-Claude calls `get_partner_brief_context` to load the RFP data and partner profile,
-then writes the brief using the returned context.
 
 **Create an NDA checklist:**
 
@@ -687,7 +677,7 @@ then writes the brief using the returned context.
 
 ---
 
-### Workflow 8: Validate Completeness Before Submission
+### Workflow 9: Validate Completeness Before Submission
 
 > "Validate document completeness for RFP abc123"
 
@@ -698,7 +688,7 @@ Returns:
 
 ---
 
-### Workflow 9: Full End-to-End (Orchestrated)
+### Workflow 10: Full End-to-End (Orchestrated)
 
 > "Walk me through the full proposal workflow for RFP abc123"
 
@@ -708,24 +698,22 @@ proposal, financial proposal, review and submission.
 
 ---
 
-### Workflow 10: Index Past Proposals
+### Workflow 11: Index Past Proposals
 
 After uploading past proposal files to `data/past_proposals/`, index them for
-fast search. Indexing parses all files once, Claude extracts structured metadata,
-and it's stored in the database.
+fast search. Indexing parses all files once, extracts structured metadata using
+AI, and stores it in the database.
 
 **Index a single proposal:**
 
 > "Index the past proposal in tra_network_2024"
 
 **What happens:**
-1. Claude calls `index_past_proposal` which parses all files (PDF, DOCX, XLSX, MD, TXT)
-2. Raw content is returned to Claude for analysis
-3. Claude extracts: title, client, sector, technologies, pricing, keywords
-4. Claude calls `save_proposal_index` to store the metadata
-5. A human-readable `_summary.md` is saved in the folder
-6. Metadata is stored in the database for instant search (FTS5 keyword index)
-7. If Voyage AI is configured, a vector embedding is generated for semantic search
+1. All files in the folder are parsed (PDF, DOCX, XLSX, MD, TXT)
+2. AI extracts: title, client, sector, technologies, pricing, keywords
+3. A human-readable `_summary.md` is saved in the folder
+4. Metadata is stored in the database for instant search (FTS5 keyword index)
+5. If Voyage AI is configured, a vector embedding is generated for semantic search
 
 **Index multiple proposals:**
 
@@ -743,7 +731,7 @@ scp -r my-proposal/ root@tender.yfi.ae:/opt/tenderai/data/past_proposals/tra-net
 
 ---
 
-### Workflow 11: Search Past Proposals
+### Workflow 12: Search Past Proposals
 
 Once proposals are indexed, you can search them instantly.
 
@@ -770,7 +758,7 @@ the exact keywords.
 
 ---
 
-### Workflow 12: List All Indexed Proposals
+### Workflow 13: List All Indexed Proposals
 
 > "List all indexed past proposals"
 
@@ -783,28 +771,24 @@ sector, by country, and total combined value.
 
 | # | Tool | What It Does |
 |---|------|-------------|
-| 1 | `parse_tender_rfp` | Parse PDF/DOCX/XLSX → return raw text for Claude to analyze |
-| 2 | `save_rfp` | Save Claude-structured RFP data to database |
-| 3 | `get_rfp` | Fetch an RFP record by ID |
-| 4 | `list_rfps` | List all RFPs, optionally filtered by status |
-| 5 | `export_compliance_matrix` | Claude's compliance analysis → DOCX matrix |
-| 6 | `check_submission_deadline` | Show deadline, days remaining, milestone dates |
-| 7 | `validate_document_completeness` | Check all mandatory sections exist |
-| 8 | `get_proposal_context` | Load company profile, RFP, templates, past proposals for grounding |
-| 9 | `save_proposal_section` | Save a section written by Claude |
-| 10 | `assemble_technical_proposal` | Combine saved sections → formatted DOCX |
-| 11 | `ingest_vendor_quote` | Parse vendor PDF/XLSX → return raw text for Claude |
-| 12 | `save_vendor_items` | Save Claude-extracted vendor line items |
-| 13 | `build_bom` | Combine vendor quotes → Bill of Materials |
-| 14 | `calculate_final_pricing` | Apply margins → final pricing |
-| 15 | `generate_financial_proposal` | BOM → financial proposal DOCX + BOM XLSX |
-| 16 | `get_partner_brief_context` | Load RFP/partner context for Claude to write a brief |
-| 17 | `create_nda_checklist` | Generate NDA checklist for partner |
-| 18 | `track_partner_deliverable` | Track expected partner deliverable |
-| 19 | `index_past_proposal` | Parse all files in a proposal folder → return raw content |
-| 20 | `save_proposal_index` | Save Claude-structured metadata into search index |
-| 21 | `search_past_proposals` | Search indexed proposals (keyword, semantic, or hybrid) |
-| 22 | `list_indexed_proposals` | List all indexed proposals with stats |
+| 1 | `parse_tender_rfp` | Parse PDF/DOCX RFP → structured data + database record |
+| 2 | `generate_compliance_matrix` | RFP requirements → compliance matrix DOCX |
+| 3 | `check_submission_deadline` | Show deadline, days remaining, milestone dates |
+| 4 | `validate_document_completeness` | Check all mandatory sections exist |
+| 5 | `write_technical_section` | Write one proposal section with AI |
+| 6 | `build_full_technical_proposal` | Generate all sections → assembled DOCX |
+| 7 | `generate_architecture_description` | Technical architecture narrative |
+| 8 | `write_compliance_narrative` | Compliance paragraph for one requirement |
+| 9 | `ingest_vendor_quote` | Parse vendor PDF/XLSX → extract line items |
+| 10 | `build_bom` | Combine vendor quotes → Bill of Materials |
+| 11 | `calculate_final_pricing` | Apply margins → final pricing |
+| 12 | `generate_financial_proposal` | BOM → financial proposal DOCX + BOM XLSX |
+| 13 | `draft_partner_brief` | Generate partner requirements brief |
+| 14 | `create_nda_checklist` | Generate NDA checklist for partner |
+| 15 | `track_partner_deliverable` | Track expected partner deliverable |
+| 16 | `index_past_proposal` | Parse + AI-summarize a past proposal folder → searchable index |
+| 17 | `search_past_proposals` | Search indexed proposals (keyword, semantic, or hybrid) |
+| 18 | `list_indexed_proposals` | List all indexed proposals with stats |
 
 ---
 
@@ -861,9 +845,9 @@ sudo systemctl start tenderai
 journalctl -u tenderai -n 50
 
 # Common fixes:
-# 1. Python venv not created: python3 -m venv venv
-# 2. Dependencies not installed: pip install -r requirements.txt
-# 3. Port already in use (HTTP mode): change PORT in .env
+# 1. Missing ANTHROPIC_API_KEY in .env
+# 2. Python venv not created: python3 -m venv venv
+# 3. Dependencies not installed: pip install -r requirements.txt
 ```
 
 ### "RFP not found" errors

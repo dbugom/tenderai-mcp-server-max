@@ -9,11 +9,12 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 from app.db.database import Database
+from app.services.llm import LLMService
 
 logger = logging.getLogger(__name__)
 
 
-def register_prompts(mcp: FastMCP, db: Database, data_dir: Path) -> None:
+def register_prompts(mcp: FastMCP, db: Database, llm: LLMService, data_dir: Path) -> None:
     """Register all workflow prompts on the MCP server."""
 
     async def _load_company_profile() -> str:
@@ -244,22 +245,23 @@ def register_prompts(mcp: FastMCP, db: Database, data_dir: Path) -> None:
             f"### Phase 2: Partner Coordination\n"
             f"4. Identify required partners/subcontractors\n"
             f"5. Use `create_nda_checklist` for each partner\n"
-            f"6. Use `get_partner_brief_context` → write the brief yourself\n"
+            f"6. Use `draft_partner_brief` for each partner\n"
             f"7. Use `track_partner_deliverable` for each expected input\n\n"
             f"### Phase 3: Technical Proposal\n"
-            f"8. For each section: `get_proposal_context` → write the section → `save_proposal_section`\n"
-            f"9. Use `assemble_technical_proposal` to generate the DOCX\n"
-            f"10. Use `export_compliance_matrix` with your compliance analysis\n\n"
+            f"8. Use `write_technical_section` for each section, or\n"
+            f"9. Use `build_full_technical_proposal` to generate all at once\n"
+            f"10. Use `generate_architecture_description` for network/system diagrams\n"
+            f"11. Use `generate_compliance_matrix` for compliance documentation\n\n"
             f"### Phase 4: Financial Proposal\n"
-            f"11. Use `ingest_vendor_quote` → analyze the raw data → `save_vendor_items`\n"
-            f"12. Use `build_bom` to assemble the Bill of Materials\n"
-            f"13. Use `calculate_final_pricing` to apply margins\n"
-            f"14. Use `generate_financial_proposal` for the pricing document\n\n"
+            f"12. Use `ingest_vendor_quote` for each vendor quote received\n"
+            f"13. Use `build_bom` to assemble the Bill of Materials\n"
+            f"14. Use `calculate_final_pricing` to apply margins\n"
+            f"15. Use `generate_financial_proposal` for the pricing document\n\n"
             f"### Phase 5: Review & Submit\n"
-            f"15. Use `validate_document_completeness` to check for gaps\n"
-            f"16. Use `write_executive_summary` prompt for the final exec summary\n"
-            f"17. Review all generated DOCX documents\n"
-            f"18. Package and submit per the RFP instructions\n\n"
+            f"16. Use `validate_document_completeness` to check for gaps\n"
+            f"17. Use `write_executive_summary` prompt for the final exec summary\n"
+            f"18. Review all generated DOCX documents\n"
+            f"19. Package and submit per the RFP instructions\n\n"
             f"## Current RFP Requirements\n" +
             "\n".join(f"- {r}" if isinstance(r, str) else f"- {json.dumps(r)}" for r in rfp.get("requirements", [])) +
             f"\n\n## Notes\n"

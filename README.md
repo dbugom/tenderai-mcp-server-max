@@ -4,12 +4,11 @@ A production-ready [Model Context Protocol](https://modelcontextprotocol.io/) se
 
 ## Features
 
-- **Zero API Keys Required**: Works with Claude Max/Pro subscription — no ANTHROPIC_API_KEY needed
-- **Data-Tool Architecture**: Tools provide raw data; Claude (your subscription) does all reasoning and writing
-- **20 MCP Tools** across 5 domains: Document Intelligence, Technical Proposals, Financial Proposals, Partner Coordination, Past Proposal Indexing & Search
+- **18 MCP Tools** across 5 domains: Document Intelligence, Technical Proposals, Financial Proposals, Partner Coordination, Past Proposal Indexing & Search
 - **Hybrid Search**: FTS5 full-text keyword search + sqlite-vec vector similarity search with Reciprocal Rank Fusion (RRF)
 - **5 Resource URI schemes** for knowledge base access: past proposals, templates, vendors, company profile, standards
 - **4 Workflow Prompts** for end-to-end orchestration: tender analysis, executive summaries, partner checks, full proposal workflow
+- **AI-Powered**: Uses Claude to parse RFPs, generate proposal sections, and produce compliance narratives
 - **Voyage AI Embeddings** (optional): Semantic search over past proposals — finds similar projects even without exact keyword matches
 - **Document Generation**: Professional DOCX proposals and XLSX BOM spreadsheets
 - **SQLite Database**: Tracks RFPs, proposals, vendors, BOM items, partners, deliverables, and indexed past proposals
@@ -26,8 +25,7 @@ pip install -r requirements.txt
 
 # Configure
 cp .env.example .env
-# Edit .env — optionally set VOYAGE_API_KEY for vector search
-# ANTHROPIC_API_KEY is NOT required (Claude Max does the reasoning)
+# Edit .env — set ANTHROPIC_API_KEY
 
 # Run
 python -m app.server
@@ -42,7 +40,10 @@ python -m app.server
     "tenderai": {
       "command": "python",
       "args": ["-m", "app.server"],
-      "cwd": "/path/to/tenders"
+      "cwd": "/path/to/tenders",
+      "env": {
+        "ANTHROPIC_API_KEY": "sk-ant-..."
+      }
     }
   }
 }
@@ -67,7 +68,7 @@ python -m app.server
 
 ```bash
 sudo ./setup.sh tender.yfi.ae
-# Edit /opt/tenderai/.env — optionally set VOYAGE_API_KEY
+# Edit /opt/tenderai/.env — set ANTHROPIC_API_KEY
 sudo systemctl start tenderai
 ```
 
@@ -76,26 +77,23 @@ sudo systemctl start tenderai
 ### Document Intelligence
 | Tool | Description |
 |------|-------------|
-| `parse_tender_rfp` | Parse PDF/DOCX/XLSX and return raw text for Claude to analyze |
-| `save_rfp` | Save Claude-structured RFP data to the database |
-| `get_rfp` | Fetch an RFP record from the database |
-| `list_rfps` | List all RFPs, optionally filtered by status |
-| `export_compliance_matrix` | Generate compliance matrix DOCX from Claude's analysis |
+| `parse_tender_rfp` | Parse PDF/DOCX RFP and extract structured data |
+| `generate_compliance_matrix` | Generate compliance matrix DOCX for an RFP |
 | `check_submission_deadline` | Check deadline and calculate milestones |
 | `validate_document_completeness` | Validate proposal has all required sections |
 
 ### Technical Proposals
 | Tool | Description |
 |------|-------------|
-| `get_proposal_context` | Load company profile, RFP data, templates, and past proposals for grounding |
-| `save_proposal_section` | Save a proposal section written by Claude |
-| `assemble_technical_proposal` | Assemble saved sections into formatted DOCX |
+| `write_technical_section` | Write a single proposal section with AI |
+| `build_full_technical_proposal` | Generate complete technical proposal DOCX |
+| `generate_architecture_description` | Generate formal architecture narrative |
+| `write_compliance_narrative` | Write compliance response for a requirement |
 
 ### Financial Proposals
 | Tool | Description |
 |------|-------------|
-| `ingest_vendor_quote` | Parse vendor quote and return raw text for Claude to analyze |
-| `save_vendor_items` | Save Claude-extracted vendor items |
+| `ingest_vendor_quote` | Parse vendor quote and extract line items |
 | `build_bom` | Build Bill of Materials from vendor quotes |
 | `calculate_final_pricing` | Calculate final pricing with margins |
 | `generate_financial_proposal` | Generate financial proposal DOCX + BOM XLSX |
@@ -103,15 +101,14 @@ sudo systemctl start tenderai
 ### Partner Coordination
 | Tool | Description |
 |------|-------------|
-| `get_partner_brief_context` | Load RFP/partner context for Claude to write a brief |
+| `draft_partner_brief` | Draft technical requirements brief for partner |
 | `create_nda_checklist` | Generate NDA checklist for partner engagement |
 | `track_partner_deliverable` | Track expected deliverable from partner |
 
 ### Past Proposal Indexing & Search
 | Tool | Description |
 |------|-------------|
-| `index_past_proposal` | Parse all files in a proposal folder and return raw content |
-| `save_proposal_index` | Save Claude-structured metadata into the search index |
+| `index_past_proposal` | Parse + AI-summarize a past proposal folder into searchable index |
 | `search_past_proposals` | Search indexed proposals — keyword, semantic, or hybrid mode |
 | `list_indexed_proposals` | List all indexed proposals with aggregate stats |
 
@@ -167,9 +164,9 @@ data/
 Past proposals can be indexed for fast retrieval:
 
 ```
-Upload files → index_past_proposal → Claude analyzes content → save_proposal_index → SQLite
-                                                                                    ├── FTS5 (keyword search, always on)
-                                                                                    └── sqlite-vec (vector search, optional)
+Upload files → index_past_proposal → AI extracts metadata → stored in SQLite
+                                                           ├── FTS5 (keyword search, always on)
+                                                           └── sqlite-vec (vector search, optional)
 ```
 
 - **FTS5**: BM25 keyword ranking with porter stemming — sub-millisecond search
@@ -194,11 +191,11 @@ app/
 ├── server.py              # Entry point — FastMCP init and wiring
 ├── config.py              # Settings from .env
 ├── tools/
-│   ├── document.py        # 7 document intelligence tools (data-only)
-│   ├── technical.py       # 3 technical proposal tools (data-only)
-│   ├── financial.py       # 5 financial proposal tools (data-only)
-│   ├── partners.py        # 3 partner coordination tools (data-only)
-│   └── indexing.py        # 4 past proposal indexing & search tools
+│   ├── document.py        # 4 document intelligence tools
+│   ├── technical.py       # 4 technical proposal tools
+│   ├── financial.py       # 4 financial proposal tools
+│   ├── partners.py        # 3 partner coordination tools
+│   └── indexing.py        # 3 past proposal indexing & search tools
 ├── resources/
 │   └── knowledge.py       # 5 resource URI handlers
 ├── prompts/
@@ -208,7 +205,7 @@ app/
 │   ├── database.py        # Async database layer + sqlite-vec vector search
 │   └── models.py          # Pydantic models
 ├── services/
-│   ├── llm.py             # Anthropic SDK wrapper (optional, for server-side AI)
+│   ├── llm.py             # Anthropic SDK wrapper (15 prompt templates)
 │   ├── parser.py          # PDF/DOCX/XLSX parser
 │   ├── embeddings.py      # Voyage AI embedding service (optional)
 │   └── docwriter.py       # DOCX/XLSX generator

@@ -17,6 +17,7 @@ from mcp.server.fastmcp import FastMCP
 from app.config import Settings, load_settings
 from app.db.database import Database
 from app.services.docwriter import DocWriterService
+from app.services.llm import LLMService
 from app.services.parser import ParserService
 
 logger = logging.getLogger("tenderai")
@@ -36,18 +37,11 @@ def build_server(settings: Settings) -> tuple[FastMCP, Database]:
     db = Database(settings.abs_database_path(), embedding_dimensions=settings.embedding_dimensions)
 
     # --- Services ---
-    llm = None
-    if settings.anthropic_api_key and settings.anthropic_api_key != "sk-ant-...":
-        from app.services.llm import LLMService
-        llm = LLMService(
-            api_key=settings.anthropic_api_key,
-            model=settings.llm_model,
-            max_tokens=settings.llm_max_tokens,
-        )
-        logger.info("LLMService enabled — server-side AI tools available")
-    else:
-        logger.info("ANTHROPIC_API_KEY not set — data-only tools mode (Claude does the reasoning)")
-
+    llm = LLMService(
+        api_key=settings.anthropic_api_key,
+        model=settings.llm_model,
+        max_tokens=settings.llm_max_tokens,
+    )
     parser = ParserService(data_dir=settings.abs_data_dir())
     docwriter = DocWriterService(
         output_dir=settings.abs_data_dir() / "generated_proposals",
@@ -57,14 +51,10 @@ def build_server(settings: Settings) -> tuple[FastMCP, Database]:
     mcp = FastMCP(
         "TenderAI",
         instructions=(
-            "TenderAI is a tender/proposal management system. It provides data tools — "
-            "you (Claude) do all the reasoning, writing, and analysis.\n\n"
-            "Typical workflow:\n"
-            "1. parse_tender_rfp → returns raw text → you structure it → save_rfp\n"
-            "2. get_proposal_context → returns grounding docs → you write the section → save_proposal_section\n"
-            "3. assemble_technical_proposal → generates DOCX from saved sections\n"
-            "4. ingest_vendor_quote → returns raw data → you extract items → save_vendor_items → build_bom\n\n"
-            "Always start by parsing the RFP, then work through sections one at a time."
+            "TenderAI is a tender/proposal management system. Use its tools to parse RFP documents, "
+            "write technical and financial proposals, coordinate with partners, and track compliance. "
+            "Always start by parsing the RFP with parse_tender_rfp, then use the analysis and "
+            "writing tools to build the proposal."
         ),
     )
 
@@ -77,7 +67,7 @@ def build_server(settings: Settings) -> tuple[FastMCP, Database]:
 
     data_dir = settings.abs_data_dir()
 
-    register_document_tools(mcp, db, parser, docwriter, data_dir)
+    register_document_tools(mcp, db, llm, parser, docwriter, data_dir)
 
     # --- Embeddings (optional) ---
     embeddings = None
@@ -92,13 +82,13 @@ def build_server(settings: Settings) -> tuple[FastMCP, Database]:
     else:
         logger.info("VOYAGE_API_KEY not set — vector search disabled, using FTS5 only")
 
-    register_technical_tools(mcp, db, parser, docwriter, data_dir, settings.company_name, embeddings=embeddings)
+    register_technical_tools(mcp, db, llm, parser, docwriter, data_dir, settings.company_name, embeddings=embeddings)
     register_financial_tools(
-        mcp, db, parser, docwriter, data_dir,
+        mcp, db, llm, parser, docwriter, data_dir,
         settings.default_currency, settings.default_margin_pct,
     )
-    register_partner_tools(mcp, db, data_dir)
-    register_indexing_tools(mcp, db, parser, data_dir, embeddings=embeddings)
+    register_partner_tools(mcp, db, llm, data_dir)
+    register_indexing_tools(mcp, db, llm, parser, data_dir, embeddings=embeddings)
 
     # --- Register Resources ---
     from app.resources.knowledge import register_resources
@@ -106,7 +96,7 @@ def build_server(settings: Settings) -> tuple[FastMCP, Database]:
 
     # --- Register Prompts ---
     from app.prompts.workflows import register_prompts
-    register_prompts(mcp, db, data_dir)
+    register_prompts(mcp, db, llm, data_dir)
 
     logger.info("TenderAI server built — transport=%s", settings.transport)
     return mcp, db

@@ -1,0 +1,42 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+
+# Database
+db/*.db
+
+# Data (user-specific content)
+data/rfp_documents/*
+data/past_proposals/*
+data/vendor_quotes/*
+data/generated_proposals/*
+data/knowledge_base/company_profile/*
+data/knowledge_base/templates/*
+data/knowledge_base/standards/*
+
+# Keep directory structure
+!data/rfp_documents/.gitkeep
+!data/past_proposals/.gitkeep
+!data/vendor_quotes/.gitkeep
+!data/generated_proposals/.gitkeep
+!data/knowledge_base/company_profile/.gitkeep
+!data/knowledge_base/templates/.gitkeep
+!data/knowledge_base/standards/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

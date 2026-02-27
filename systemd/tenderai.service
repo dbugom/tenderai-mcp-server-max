@@ -1,0 +1,28 @@
+[Unit]
+Description=TenderAI MCP Server
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tenderai
+Group=tenderai
+WorkingDirectory=/opt/tenderai
+ExecStart=/opt/tenderai/venv/bin/python -m app.server
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Environment
+EnvironmentFile=/opt/tenderai/.env
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/tenderai/db /opt/tenderai/data
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
